@@ -368,7 +368,100 @@ X-Forwarded-For 最左一个合法地址  →  X-Real-IP  →  传输层 remoteA
 - 库一时抖动：有旧快照就沿用旧快照继续服务并告警；**从未加载成功过时 fail-closed 回 503**，绝不裸放行。
 - 密钥有效期按每笔请求的当前时刻判定，到点即拒，不需要额外操作。
 
-## 配置怎么存
+## 限流（按接入应用：总量 + 来源地址，两层独立）
+
+给接入应用和终端用户上一道阀门，防有人把后端打崩。**不改 `gw_app` 表结构**：额度配置放独立新表
+`gw_rate_limit`（DDL `src/main/resources/db/gw_rate_limit.sql`），窗口计数放 Redis，两份存储各司其职。
+功能默认关闭，生产置 `RATE_LIMIT_ENABLED=true`（与 `APP_AUTH_ENABLED=true` 同时开：应用编号取自
+鉴权后改写的可信 `X-App-No`，未开鉴权时这个头可伪造，按它计数等于没阀门）。
+
+### 额度怎么配（两层，彼此独立，可同时配/只配一层/都不配）
+
+- **应用总量（scope=APP）**：某应用一分钟最多调多少次。同一个应用不管请求落到哪台网关、来自哪个地址，合计共用。
+- **来源地址（scope=IP）**：某应用下**单个来源地址**一分钟最多多少次。某个地址刷得凶只卡它自己，
+  不连累同应用其他正常来源。IP 层只认「该应用+该地址」的专属行，**不回落默认**——没配就是这层不限。
+- **全局默认（scope=DEFAULT，appNo 固定 `*`）**：没给某应用单独配时按它走；默认也没配（或默认显式不限）→ 不限。
+
+「**没配这行**」与「**配了但显式不限**」是两回事，都查得出来：行不存在 = 没配（APP 层回落默认）；
+行存在但 `per_minute_limit = NULL` = 这一层明确不限（APP 层**不**回落默认）。额度取值正整数 1..1,000,000（封顶防配错撑爆）。
+
+**额度改了何时生效**：管理写操作事务提交后发进程内 `RateLimitChangedEvent`，本实例额度快照立即原子替换，
+**运营改完，在跑的实例不重启、下一笔新请求就按新额度**；其他实例靠 10s 定时兜底刷新（`apigw.rate-limit.refresh-interval`）收敛。
+改额度**不重置计数**：当前窗内立即按新额度判（调大自然多放，调小则当前累计一到新额度即拒），窗口到点自然从零数。
+
+### 管理接口（统一返回 `{code,msg,data}`，不存在的应用报 404）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/gateway/rate-limits/default` | 看默认额度行（没配 data=null） |
+| PUT | `/api/gateway/rate-limits/default` | 配/改默认额度，body `{"perMinuteLimit":500}`；null/不传=默认不限 |
+| DELETE | `/api/gateway/rate-limits/default` | 删默认行（没默认=未配应用一律不限），幂等 |
+| GET | `/api/gateway/rate-limits/apps/{appNo}` | 看应用总量配置行 |
+| PUT | `/api/gateway/rate-limits/apps/{appNo}` | 配/改应用每分钟总量 |
+| DELETE | `/api/gateway/rate-limits/apps/{appNo}` | 删应用总量行（回落默认），幂等 |
+| GET | `/api/gateway/rate-limits/apps/{appNo}/ips?ip=` | 看某来源地址的单独额度（ip 走 query 兼容 IPv6 冒号） |
+| PUT | `/api/gateway/rate-limits/apps/{appNo}/ips?ip=` | 配/改该来源额度（按 `ClientIpResolver` 归一再存） |
+| DELETE | `/api/gateway/rate-limits/apps/{appNo}/ips?ip=` | 删该来源单独额度（只受总量约束），幂等 |
+| GET | `/api/gateway/rate-limits/apps/{appNo}/effective?ip=` | **当前生效**的两层额度（数值 + 来源口径） |
+
+`effective` 返回 `appPerMinuteLimit/appLimitSource` 与 `ipPerMinuteLimit/ipLimitSource`，
+source 说清当前值来自哪：`APP`（应用专属，值为 null=对该应用显式不限）、`DEFAULT`（回落默认）、
+`IP`（来源专属）、`UNLIMITED`（这层不限）。
+
+### 拒绝表现：429 + Retry-After，且不打上游
+
+超任一层都在 `RateLimitWebFilter`（顺序在接入鉴权之后、转发之前）短路：
+
+- 超应用总量 → `429` + `X-Gateway-Error: RATE_LIMITED_APP`；
+- 超来源额度 → `429` + `X-Gateway-Error: RATE_LIMITED_IP`（两层同时满先报应用总量）；
+- 响应体是网关统一 JSON `{error,message,traceId}`，并带 **`Retry-After`（delta-seconds）**。
+
+**`Retry-After` 的口径是固定的、有意义的**：从拒绝时刻到「**当前这个固定窗口结束**」还要等的整秒数
+（向上取整，至少 1 秒）——调用方等到该时刻，本窗口配额必然已重置、下一个窗口从 0 开始计数，那时再试一定进入新窗口。
+被限请求在网关上就结束，**不匹配路由、不打上游**，上游不会被超限流量惊动。
+
+### 计数的几条硬保证
+
+1. **应用总量全局共享**：计数不在任何一台网关进程内，而在**所有实例都连的同一份 Redis**。
+   同一应用无论落在哪台机器，加的是同一个 key，全局合计按同一额度，不会 N 台各算各的放出 N 倍。
+2. **固定窗口，余数不带窗**：窗口是「贴齐整分钟的自然分钟」，窗口号 `floor(RedisTIME / 60s)` 拼进 key 名。
+   窗口到点换一个全新 key、从 0 开始数；旧窗的 key 不删但不再被读，上一窗的任何余量/余数都不可能带进下一窗。
+   窗口号在 Lua 脚本内用 **Redis 服务端 `TIME`** 计算（不信任网关本地钟，多机时钟偏差也不会各算各的 key）。
+3. **并发不超发也不少放**：两层的「看当前计数 → 判额度 → 通过才各占一次（INCR）」是**同一个 Lua 脚本一次执行**。
+   Redis 单线程执行脚本，脚本对其他命令原子：多台机器同时冲进来也在服务端串行，先到的占名额、后到的看到的是
+   已被所有实例累加过的值。所以第 N 笔放行、第 N+1 笔拒绝是确定的——既不会两台都读到「未满」一起放行导致超发，
+   也不会少放。**拒绝不 INCR**：被挡请求不消耗任何一层名额（刷凶的地址不会把应用总量吃光，反之亦然）。
+   两层 key 用同一个 hash tag `{appNo}` 保证 Redis Cluster 下同槽，脚本能一次操作。
+
+### 计数存储暂时不可用：先定死的策略（不死等比放不放行更重要）
+
+Redis 超时、连不上、脚本出错时（`RateLimiter`）：
+
+- **每次计数调用硬超时 `apigw.rate-limit.redis-timeout`（默认 100ms）**：到点立刻决策，绝不把每个请求
+  卡在计数器上死等——Redis 抖动不会拖垮 Netty 事件循环、拖垮整个网关；
+- **再加熔断器**：连续失败 `circuit-breaker-threshold`（默认 5）次后熔断打开，打开期间（`circuit-breaker-open-ms`，
+  默认 5s）**根本不再发 Redis 请求**，直接按策略决策（连 100ms 都不等）；到点放一笔半开探活，成功即闭合。
+  Redis 真挂时网关在限流上的开销约等于零；
+- **熔断/超时期间放行还是挡回**由 `apigw.rate-limit.fail-open-on-error` 定，**默认 fail-open（放行）**：
+  限流是保护上游的阀门，阀门的动力源断了时若默认全挡，等于让 Redis 一个组件故障变成全站调用失败、网关自己成单点。
+  配合「短超时 + 立即熔断」，故障窗口内是**短暂**放行且已快速摘流，不会持续冲击；同时打 warn、计失败数，运维须告警。
+  对「宁可短暂不可用也不裸放」的严格场景，置 `fail-open-on-error=false` 即 fail-closed，回
+  `503 RATE_LIMIT_STORE_UNAVAILABLE`，同样不打上游。fail-open 放行的请求不补计数，存储恢复后从下一笔起在当前窗已有值上继续。
+
+### 存储不膨胀
+
+计数键 TTL = 窗口长 + 30s 宽限（容忍边界/时钟小偏差），只在该 key 首次创建（INCR 返回 1）时设置。
+窗口一到就换 key，旧键活不过一分半即被 Redis 自动删除；存储里同时存在的最多是每个活跃应用一个 app 键 +
+每个活跃来源一个 ip 键，不需要任何定时扫描清理。额度表只有运营配置行（应用数 + 配了来源的条数），低频写、量级很小。
+
+### 位置与口径
+
+- 过滤器顺序：接入鉴权（HIGHEST_PRECEDENCE+5）→ **限流（+7）** → 转发（+10）。
+  到达限流时 `X-App-No` 已是网关认证后改写的可信编号，限流按真实应用计数；管理接口 `/api/**`、`/actuator/**` 不参与限流。
+- 来源地址用全网关唯一的 `ClientIpResolver`（XFF 最左合法 → X-Real-IP → 传输层对端）并 canonicalize，
+  与鉴权、流水同一口径；进 key 前对规范 IP 取 SHA-256（IPv6 含冒号不直接进 key）。
+
+
 
 ```
 Redis key   apigw:routes          类型 Hash
@@ -420,6 +513,21 @@ mvn test
 - `ClientAppControllerWebTest`：统一返回、创建响应一次性密钥且无散列字段、404/错误收口、来路增删。
 - `AppAuthWebFilterTest`：真实 Netty 端到端——缺/错凭据与过期 401、停用/来路 403、XFF 多跳取值、`.1` 不放 `.10`、IPv6 写法归并、停用与名单改完对下一笔请求即时生效。
 - `AppAuthEnabledSmokeTest` / `AppAuthDisabledSmokeTest`：开关开时整组 bean 装配且快照建立，关时一个都不装、上下文照常起。
+- `RateQuotaTest`：额度模型形状（APP/IP/DEFAULT 三类行）、null=显式不限、额度上下界。
+- `JdbcRateLimitRepositoryTest`：H2 真实 SQL——upsert 第一次插第二次原地改（唯一键不插两行）、null 额度落库、
+  「没配」与「显式 null 行」区分、三类行共存、删除幂等。
+- `RateLimitCatalogTest`：应用层 APP→DEFAULT→不限回落、IP 层不回落默认、显式 null 不回落、热刷新、失败沿用旧快照。
+- `RateLimiterTest`：两层都不限不碰存储、计数超时不死等（100ms 内决策）、连续失败熔断（熔断期不再发 Redis）、
+  半开探活恢复、fail-open/fail-closed 两种口径。
+- `RateLimitWebFilterTest`：真实 Netty 端到端（内存计数）——精确放到额度后 429、Retry-After 在窗口剩余范围内、
+  刷凶地址只卡自己（其他来源照放）、默认额度、显式不限不回落默认、被限请求不打上游（上游命中数不增长）、
+  `/api` 不参与限流、fail-closed 回 503。
+- `RedisRateLimitWindowStoreIT`：连真实 Redis（不可达自动跳过，2s 短窗口）——精确放行/等待秒数、拒绝不占名额、
+  窗口到点从零重数（余数不带窗）、16 线程抢 200 名额**全局放行恰好=额度不超发不少放**且 Redis 终值停在额度上、
+  计数键 TTL 到期自动回收、两层都不限不建任何 key。
+- `RateLimitServiceTest`：应用存在才给配（404）、来源 IP 归一并拒收主机名/网段、null 透传为显式不限、
+  写后发变更事件、删除幂等不刷事件。
+- `RateLimitDisabledSmokeTest`：限流开关关时限流 bean/过滤器/控制器一个都不装、上下文照常起。
 - `GatewayProxyIT`：真实容器 + 真实 Redis + 真实上游，建完路由立刻能转发、删完立刻失效；探不到 Redis 时自动跳过。
 
 ## 已知边界（留给后续题目）

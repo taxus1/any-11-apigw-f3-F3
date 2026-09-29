@@ -18,11 +18,12 @@ import javax.sql.DataSource;
  * 网关关系型存储的公共装配：访问流水与第三方接入凭据共用同一个数据源/JdbcTemplate。
  *
  * 主程序排除了 {@code DataSourceAutoConfiguration}，所以没用到库的环境（纯本地转发）
- * 不会因为缺 spring.datasource.url 启动失败。只要下面两个开关任一为 true 就建池：
+ * 不会因为缺 spring.datasource.url 启动失败。只要下面开关任一为 true 就建池：
  * - {@code apigw.accesslog.enabled=true}
  * - {@code apigw.app-auth.enabled=true}
+ * - {@code apigw.rate-limit.enabled=true}
  *
- * 两类数据同在一个 MySQL 库里（DDL 见 resources/db/*.sql），池保持很小：
+ * 几类数据同在一个 MySQL 库里（DDL 见 resources/db/*.sql），池保持很小：
  * 写只有后台线程/低频管理操作，没必要占一堆连接。
  */
 @Configuration
@@ -49,7 +50,7 @@ public class SharedDataSourceConfig {
         return new JdbcTemplate(gatewayDataSource);
     }
 
-    /** accesslog 或 app-auth 任一开启即装配 JDBC。 */
+    /** accesslog / app-auth / rate-limit 任一开启即装配 JDBC。 */
     static class AnyJdbcFeatureEnabled extends SpringBootCondition {
         @Override
         public ConditionOutcome getMatchOutcome(ConditionContext context, AnnotatedTypeMetadata metadata) {
@@ -57,9 +58,14 @@ public class SharedDataSourceConfig {
                     .getProperty("apigw.accesslog.enabled", Boolean.class);
             Boolean appAuth = context.getEnvironment()
                     .getProperty("apigw.app-auth.enabled", Boolean.class);
-            boolean match = Boolean.TRUE.equals(accessLog) || Boolean.TRUE.equals(appAuth);
+            Boolean rateLimit = context.getEnvironment()
+                    .getProperty("apigw.rate-limit.enabled", Boolean.class);
+            boolean match = Boolean.TRUE.equals(accessLog)
+                    || Boolean.TRUE.equals(appAuth)
+                    || Boolean.TRUE.equals(rateLimit);
             return new ConditionOutcome(match,
-                    "apigw.accesslog.enabled or apigw.app-auth.enabled is true");
+                    "apigw.accesslog.enabled or apigw.app-auth.enabled"
+                            + " or apigw.rate-limit.enabled is true");
         }
     }
 }

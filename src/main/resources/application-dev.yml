@@ -49,6 +49,21 @@ apigw:
     enabled: ${APP_AUTH_ENABLED:false}
     refresh-interval: 10s
     refresh-interval-ms: 10000
+  # 限流（按接入应用：应用每分钟总量 + 应用下单来源地址，两层独立可配）。
+  # 前提：与 app-auth 同时开启——应用编号取自鉴权后改写的可信 X-App-No。
+  # 额度配置存库（gw_rate_limit，运营改完经事件即时生效，多实例 10s 兜底收敛）；
+  # 窗口计数存 Redis（固定 60s 窗口、所有实例共享、单段 Lua 原子判定，窗口键 TTL 自动回收）。
+  # 计数存储故障：redis-timeout 到点不等 + 连续失败熔断（熔断期不发 Redis），
+  # 默认 fail-open（短暂放行并告警，优先不拖垮网关）；要 fail-closed 置 false（回 503）。
+  rate-limit:
+    enabled: ${RATE_LIMIT_ENABLED:false}
+    refresh-interval: 10s
+    refresh-interval-ms: 10000
+    redis-timeout: 100ms
+    fail-open-on-error: ${RATE_LIMIT_FAIL_OPEN:true}
+    circuit-breaker-threshold: 5
+    circuit-breaker-open-ms: 5000
+    window-seconds: 60
   # 用户登录令牌鉴权（自签 JWT，算法钉死 HS256）。
   # 密钥只走环境变量/外部配置，绝不写进仓库；默认空 = 未启用：
   #   - 开放路由（authRequired=0）照常转发；

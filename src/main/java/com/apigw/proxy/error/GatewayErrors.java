@@ -40,6 +40,16 @@ public final class GatewayErrors {
      */
     public static Mono<Void> write(ServerWebExchange exchange, ObjectMapper objectMapper,
                                    UpstreamFailureKind kind, String traceId, Throwable detail) {
+        return write(exchange, objectMapper, kind, traceId, detail, java.util.Map.of());
+    }
+
+    /**
+     * 与 {@link #write} 相同，但可附带额外响应头。限流 429 用它带
+     * {@code Retry-After}（delta-seconds：多少秒后可重试），其余调用传空 map。
+     */
+    public static Mono<Void> write(ServerWebExchange exchange, ObjectMapper objectMapper,
+                                   UpstreamFailureKind kind, String traceId, Throwable detail,
+                                   Map<String, String> extraHeaders) {
         if (exchange.getResponse().isCommitted()) {
             log.warn("响应已提交，无法回写网关错误 kind={} traceId={}：{}",
                     kind.errorCode(), traceId, detail == null ? "-" : detail.toString());
@@ -63,6 +73,7 @@ public final class GatewayErrors {
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.set(ERROR_HEADER, kind.errorCode());
         headers.set(TRACE_HEADER, traceId);
+        extraHeaders.forEach(headers::set);
         // 这是网关自己生成的答复，内容长度必须按实际字节重算，不能沿用任何上游值
         headers.setContentLength(payload.length);
 

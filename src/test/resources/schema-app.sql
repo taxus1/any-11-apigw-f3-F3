@@ -24,3 +24,18 @@ CREATE TABLE IF NOT EXISTS gw_app_origin (
     UNIQUE KEY uk_app_ip (app_no, ip),
     KEY idx_app_no (app_no)
 );
+
+-- 限流额度配置（结构与 src/main/resources/db/gw_rate_limit.sql 对齐）
+CREATE TABLE IF NOT EXISTS gw_rate_limit (
+    id               BIGINT       NOT NULL AUTO_INCREMENT,
+    scope            VARCHAR(16)  NOT NULL,
+    app_no           VARCHAR(64)  NOT NULL,
+    ip               VARCHAR(64)  DEFAULT NULL,
+    per_minute_limit INT          DEFAULT NULL,
+    updated_by       VARCHAR(128) DEFAULT NULL,
+    created_at       TIMESTAMP(3) NOT NULL,
+    updated_at       TIMESTAMP(3) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_scope_app_ip (scope, app_no, ip),
+    KEY idx_rl_app_no (app_no)
+);

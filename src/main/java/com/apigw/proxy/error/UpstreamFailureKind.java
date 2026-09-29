@@ -36,6 +36,19 @@ public enum UpstreamFailureKind {
     APP_CONFIG_UNAVAILABLE(HttpStatus.SERVICE_UNAVAILABLE, "APP_CONFIG_UNAVAILABLE",
             "接入鉴权配置暂时不可用，请稍后重试"),
 
+    /** 应用一分钟总量超了：请求在网关上被挡，没有打向上游。 */
+    RATE_LIMITED_APP(HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED_APP",
+            "应用调用频率超过每分钟总量额度，请稍后再试"),
+    /** 同一应用下该来源地址一分钟刷得太凶：只卡这个地址，不连累应用的其他来源。 */
+    RATE_LIMITED_IP(HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED_IP",
+            "来源地址调用频率超过每分钟额度，请稍后再试"),
+    /**
+     * 限流计数存储此刻不可用（超时/连不上），且部署口径配置为 fail-closed。
+     * 默认口径是 fail-open（放行并告警），不会回这个码。
+     */
+    RATE_LIMIT_STORE_UNAVAILABLE(HttpStatus.SERVICE_UNAVAILABLE, "RATE_LIMIT_STORE_UNAVAILABLE",
+            "限流服务暂时不可用，请稍后重试"),
+
     /** 用户令牌（JWT）缺带/签名错/过期/声明不全：对外统一文案，不透露是哪一项不过。 */
     USER_UNAUTHENTICATED(HttpStatus.UNAUTHORIZED, "USER_UNAUTHENTICATED",
             "需要登录：请携带网关签发的有效令牌（Authorization: Bearer <token>）"),
