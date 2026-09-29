@@ -47,7 +47,10 @@ public record GatewayCorsProperties(boolean enabled,
                     DEFAULT_EXPOSED_USER_ID,
                     DEFAULT_EXPOSED_TENANT_ID,
                     "X-Gateway-Trace-Id",
-                    "X-Gateway-Error");
+                    "X-Gateway-Error",
+                    "Retry-After",
+                    "X-RateLimit-Window-Start-Ms",
+                    "X-RateLimit-Window-Reset-Ms");
         }
         if (maxAge == null) {
             maxAge = Duration.ofHours(1);

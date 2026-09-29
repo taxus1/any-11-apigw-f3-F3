@@ -40,6 +40,27 @@ public final class GatewayErrors {
      */
     public static Mono<Void> write(ServerWebExchange exchange, ObjectMapper objectMapper,
                                    UpstreamFailureKind kind, String traceId, Throwable detail) {
+        return write(exchange, objectMapper, kind, traceId, detail, null);
+    }
+
+    /**
+     * 写出网关错误答复，并允许调用方在状态码/响应头确定后追加限流头。
+     * 额外头必须在 {@code Content-Length} 写出之前设置，所以由这里统一收口。
+     */
+    public static Mono<Void> write(ServerWebExchange exchange, ObjectMapper objectMapper,
+                                   UpstreamFailureKind kind, String traceId, Throwable detail,
+                                   java.util.function.Consumer<HttpHeaders> headerCustomizer) {
+        return write(exchange, objectMapper, kind, traceId, detail, headerCustomizer, null);
+    }
+
+    /**
+     * 写出网关错误答复，并允许调用方追加限流头和响应体字段。
+     * 额外头必须在 {@code Content-Length} 写出之前设置，所以由这里统一收口。
+     */
+    public static Mono<Void> write(ServerWebExchange exchange, ObjectMapper objectMapper,
+                                   UpstreamFailureKind kind, String traceId, Throwable detail,
+                                   java.util.function.Consumer<HttpHeaders> headerCustomizer,
+                                   java.util.function.Consumer<Map<String, Object>> bodyCustomizer) {
         if (exchange.getResponse().isCommitted()) {
             log.warn("响应已提交，无法回写网关错误 kind={} traceId={}：{}",
                     kind.errorCode(), traceId, detail == null ? "-" : detail.toString());
@@ -50,6 +71,9 @@ public final class GatewayErrors {
         body.put("error", kind.errorCode());
         body.put("message", kind.message());
         body.put("traceId", traceId);
+        if (bodyCustomizer != null) {
+            bodyCustomizer.accept(body);
+        }
         byte[] payload;
         try {
             payload = objectMapper.writeValueAsBytes(body);
@@ -63,6 +87,9 @@ public final class GatewayErrors {
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.set(ERROR_HEADER, kind.errorCode());
         headers.set(TRACE_HEADER, traceId);
+        if (headerCustomizer != null) {
+            headerCustomizer.accept(headers);
+        }
         // 这是网关自己生成的答复，内容长度必须按实际字节重算，不能沿用任何上游值
         headers.setContentLength(payload.length);
 

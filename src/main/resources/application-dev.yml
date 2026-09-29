@@ -49,6 +49,14 @@ apigw:
     enabled: ${APP_AUTH_ENABLED:false}
     refresh-interval: 10s
     refresh-interval-ms: 10000
+  # 接入应用两层限流（应用总量 + 应用下单来源地址）。默认随 APP_AUTH_ENABLED 一起启用；
+  # 计数和权威配置都在 Redis，多实例共享。Redis 故障时短超时 + fail-open，不拖垮网关。
+  rate-limit:
+    enabled: ${RATE_LIMIT_ENABLED:true}
+    refresh-interval: 10s
+    refresh-interval-ms: 10000
+    redis-timeout: 100ms
+    breaker-open-interval: 5s
   # 用户登录令牌鉴权（自签 JWT，算法钉死 HS256）。
   # 密钥只走环境变量/外部配置，绝不写进仓库；默认空 = 未启用：
   #   - 开放路由（authRequired=0）照常转发；

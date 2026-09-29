@@ -35,6 +35,8 @@ public enum UpstreamFailureKind {
             "应用已停用或来源地址不在来路名单内，网关拒绝本次调用"),
     APP_CONFIG_UNAVAILABLE(HttpStatus.SERVICE_UNAVAILABLE, "APP_CONFIG_UNAVAILABLE",
             "接入鉴权配置暂时不可用，请稍后重试"),
+    RATE_LIMITED(HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED",
+            "请求过于频繁，已触发限流；请按 Retry-After 头给出的等待时间后重试"),
 
     /** 用户令牌（JWT）缺带/签名错/过期/声明不全：对外统一文案，不透露是哪一项不过。 */
     USER_UNAUTHENTICATED(HttpStatus.UNAUTHORIZED, "USER_UNAUTHENTICATED",
